@@ -1,0 +1,108 @@
+// Include the libraries needed
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <Homey.h>
+
+// Data wire is connected to GPIO15
+#define ONE_WIRE_BUS 15
+
+// Setup a oneWire instance to communicate with a OneWire device
+OneWire oneWire(ONE_WIRE_BUS);
+
+// Pass our oneWire reference to Dallas Temperature sensor 
+DallasTemperature sensors( & oneWire);
+
+// to determine device addresses I used https://github.com/RuiSantosdotme/Random-Nerd-Tutorials/blob/master/Projects/ESP32/Find_DS18B20_Addresses.ino
+DeviceAddress sensor1 = { 0x28, 0xFF, 0x54, 0x45, 0x67, 0x18, 0x1, 0xB8};
+DeviceAddress sensor2 = { 0x28, 0xFF, 0x93, 0xF9, 0x65, 0x18, 0x3, 0xBB};
+
+float previousT1 = 0;
+float previousT2 = 0;
+int frequencyTimer = 60;
+
+void setup(void) {
+    Serial.begin(115200);
+    sensors.begin();
+    wifiConnect();
+
+    Serial.println("Register with Homey");
+    Homey.begin("Multiple Temperature Sensors");
+    Homey.setClass("sensor");
+    Homey.addCapability("measure_temperature.in");
+    Homey.addCapability("measure_temperature.out");
+}
+
+void loop(void) {
+    wifiConnect();
+    Serial.print("Requesting temperatures...");
+    sensors.requestTemperatures(); // Send the command to get temperatures
+    Serial.println("DONE");
+
+    //Handle incoming connections
+    Homey.loop();
+    float t1 = sensors.getTempC(sensor1);
+    float t2 = sensors.getTempC(sensor2);
+
+    if (!isnan(t1)) {
+        Serial.print("Temperature in °C = ");
+        Serial.print(t1);
+        if (initialLogFrequency()) {
+            Homey.setCapabilityValue("measure_temperature.in", t1);
+            previousT1 = t1;
+        } else if (withinRange(t1, previousT1, 0.1)) {
+            Homey.setCapabilityValue("measure_temperature.in", t1);
+            Serial.print("*");
+            previousT1 = t1;
+        }
+    }
+    if (!isnan(t2)) {
+        Serial.print("\tTemperature out % = ");
+        Serial.print(t2);
+        if (initialLogFrequency()) {
+            Homey.setCapabilityValue("measure_temperature.out", t2);
+            previousT2 = t2;
+        } else if (withinRange(t2, previousT2, .1)) {
+            Homey.setCapabilityValue("measure_temperature.out", t2);
+            Serial.print("*");
+            previousT2 = t2;
+        }
+    }
+    Serial.println();
+    if (frequencyTimer > 0) { /* first minute log often */
+        frequencyTimer -= 5;
+        delay(5000); // 5 sec
+    } else { /* afterwards every 5 minutes */
+        delay(5 * 60000);
+    }
+}
+
+void wifiConnect() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.print("Not connected to wifi, connecting now");
+        //Connect to network
+        WiFi.begin("ssid", "pass");
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+        }
+
+        //Print IP address
+        Serial.print("Connected to IP address: ");
+        Serial.println(WiFi.localIP());
+    }
+}
+
+boolean initialLogFrequency() {
+    if (frequencyTimer > 0) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+boolean withinRange(float a, float b, float delta) {
+    // trigger only if value is within bounds
+    return fabs(a - b) >= delta;
+}
