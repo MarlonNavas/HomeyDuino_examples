@@ -1,0 +1,104 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include "Adafruit_SHT31.h"
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <Homey.h>
+
+Adafruit_SHT31 sht31 = Adafruit_SHT31();
+
+float previousT = 0;
+float previousH = 0;
+int frequencyTimer = 60;
+
+//Arduino functions
+void setup() {
+    //Enable serial port
+    Serial.begin(115200);
+    Serial.println("Digital Humidity Sensor SHT31");
+
+    if (!sht31.begin(0x44)) {
+        Serial.println("Couldn't find SHT31");
+        while (1) delay(1);
+    }
+
+    wifiConnect();
+
+    Serial.println("Register with Homey");
+    Homey.begin("Digital Humidity Sensor");
+    Homey.setClass("sensor");
+    Homey.addCapability("measure_temperature");
+    Homey.addCapability("measure_humidity");
+}
+
+void wifiConnect() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.print("Not connected to wifi, connecting now");
+        //Connect to network
+        WiFi.begin("ssid", "pass");
+
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+        }
+
+        //Print IP address
+        Serial.print("Connected to IP address: ");
+        Serial.println(WiFi.localIP());
+    }
+}
+
+void loop() {
+    wifiConnect();
+    //Handle incoming connections
+    Homey.loop();
+    float t = sht31.readTemperature();
+    float h = sht31.readHumidity();
+
+    if (!isnan(t)) {
+        Serial.print("Temperature °C = ");
+        Serial.print(t);
+        if (initialLogFrequency()) {
+            Homey.setCapabilityValue("measure_temperature", t);
+            previousT = t;
+        } else if (withinRange(t, previousT, 0.1)) {
+            Homey.setCapabilityValue("measure_temperature", t);
+            Serial.print("*");
+            previousT = t;
+        }
+
+    }
+    if (!isnan(h)) {
+        Serial.print("\tHumidity % = ");
+        Serial.print(h);
+        if (initialLogFrequency()) {
+            Homey.setCapabilityValue("measure_humidity", h);
+            previousH = h;
+        } else if (withinRange(h, previousH, .5)) {
+            Homey.setCapabilityValue("measure_humidity", h);
+            Serial.print("*");
+            previousH = h;
+        }
+    }
+    Serial.println();
+
+    if (frequencyTimer > 0) { /* first minute log often */
+        frequencyTimer -= 5;
+        delay(5000); // 5 sec
+    } else {
+        delay(5 * 60000); /* afterwards every 5 minutes */
+    }
+}
+
+boolean initialLogFrequency() {
+    if (frequencyTimer > 0) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+boolean withinRange(float a, float b, float delta) {
+    // trigger only if value is within bounds
+    return fabs(a - b) >= delta;
+}
