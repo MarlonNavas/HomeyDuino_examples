@@ -1,0 +1,233 @@
+#include <ESP8266WiFi.h>
+#include <Homey.h>
+#include <Wire.h>    // I2C library
+#include "ccs811.h"  // CCS811 library
+#include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+
+/*
+  CCS811 wiring for ESP8266 NodeMCU boards:
+  VCC to 3V3,
+  GND to GND,
+  SCL to D1,
+  SDA to D2,
+  nWAKE to D3 (or GND)
+*/
+CCS811 ccs811(D3); // nWAKE on D3
+
+/*
+  BME280 wiring for ESP8266 NodeMCU boards:
+  VCC to 3V3,
+  GND to GND,
+  SCL to D5
+  SDA to D6
+  CSB to D7
+  SDO to D8
+
+  assign the ESP8266 pins to arduino GPIO pins, if you find this weird checkout the NodeMCU board pin definition
+*/
+
+#define D5 14
+#define D6 12
+#define D7 13
+#define D8 15
+
+// assign the SPI bus to pins
+#define BME_SCK D5
+#define BME_MISO D8
+#define BME_MOSI D6
+#define BME_CS D7
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK); // software SPI
+
+const char* ssid     = "ssid";
+const char* password = "password";
+
+const char* MEASURE_TEMPERATURE = "measure_temperature";
+const char* MEASURE_HUMIDITY = "measure_humidity";
+const char* MEASURE_CO2 = "measure_co2";
+const char* MEASURE_CO = "measure_co";
+
+float previousCO2 = 0;
+float previousVOC = 0;
+float previousT = 0;
+float previousH = 0;
+int frequencyTimer = 120;
+
+void setup() {
+  // Enable serial
+  Serial.begin(115200);
+  delay(2000); // small delay before start 2 sec
+  Serial.println("Starting CCS811 & BME280");
+
+  wifiConnect();
+  registerSensorWithHomey();
+
+  bool status;
+
+  // default settings
+  status = bme.begin();
+  if (!status) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+  // Enable I2C
+  Wire.begin();
+
+  // Enable CCS811
+  ccs811.set_i2cdelay(50); // Needed for ESP8266 because it doesn't handle I2C clock stretch correctly
+  bool ok = ccs811.begin();
+  if ( !ok ) Serial.println("init: CCS811 begin FAILED");
+
+  // Print CCS811 versions
+  Serial.print("init: hardware    version: "); Serial.println(ccs811.hardware_version(), HEX);
+  Serial.print("init: bootloader  version: "); Serial.println(ccs811.bootloader_version(), HEX);
+  Serial.print("init: application version: "); Serial.println(ccs811.application_version(), HEX);
+
+  // Start measuring
+  ok = ccs811.start(CCS811_MODE_1SEC);
+  if ( !ok ) Serial.println("init: CCS811 start FAILED");
+}
+
+void loop() {
+  wifiConnect();
+  //Handle incoming connections
+  Homey.loop();
+
+  // Read BME280 sensor
+  float temperature = bme.readTemperature();
+  float h = bme.readHumidity();
+  Serial.print("Temperature = "); Serial.print(temperature); Serial.print(" °C\t");
+  Serial.print("Pressure = "); Serial.print(bme.readPressure() / 100.0F); Serial.print(" hPa\t");
+  Serial.print("Approx. Altitude = ");  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));   Serial.print(" m\t");
+  Serial.print("Humidity = "); Serial.print(h); Serial.println(" %");
+
+  if (initialLogFrequency())
+  {
+    Homey.setCapabilityValue(MEASURE_TEMPERATURE, temperature);
+    previousT = temperature;
+
+    Homey.setCapabilityValue(MEASURE_HUMIDITY, h);
+    previousH = h;
+  }
+  else {
+    if (valueThreshold(temperature, previousT, 0.1))
+    {
+      Homey.setCapabilityValue(MEASURE_TEMPERATURE, temperature); Serial.print("*");
+      previousT = temperature;
+    }
+    if (valueThreshold(h, previousH, 1))
+    {
+      Homey.setCapabilityValue(MEASURE_HUMIDITY, h); Serial.print("*");
+      previousH = h;
+    }
+  }
+
+  // Round values to integer values
+  uint16_t _temperature, _relativeHumidity;
+  _temperature = (uint16_t)round(temperature) + 25; //0°C maps to -25°C therefore add + 25°C (see CCS811 datasheet for more info)
+  _relativeHumidity = (uint16_t)round(h);
+  Serial.print("Rounded int values Temperature = "); Serial.print(_temperature); Serial.print(" °C\t");
+  Serial.print("Humidity = "); Serial.print(_relativeHumidity); Serial.println(" %");
+  
+  ccs811.set_envdata(_temperature, _relativeHumidity);
+  ccs811.set_i2cdelay(50); // slight delay
+
+  // Read CCS811
+  uint16_t eco2, etvoc, errstat, raw;
+  ccs811.read(&eco2, &etvoc, &errstat, &raw);
+
+  // Print measurement results based on status
+  if ( errstat == CCS811_ERRSTAT_OK ) {
+    Serial.print("CCS811: ");
+
+    if (initialLogFrequency())
+    {
+      Serial.print("eco2=");  Serial.print(eco2);     Serial.print(" ppm  ");
+      Homey.setCapabilityValue(MEASURE_CO2, eco2);
+      previousCO2 = eco2;
+
+      Serial.print("etvoc="); Serial.print(etvoc);    Serial.print(" ppb  ");
+      Homey.setCapabilityValue(MEASURE_CO, etvoc);
+      previousVOC = etvoc;
+    }
+    else {
+      if (valueThreshold(eco2, previousCO2, 5))
+      {
+        Serial.print("eco2=");  Serial.print(eco2);     Serial.print(" ppm  ");
+        Homey.setCapabilityValue(MEASURE_CO2, eco2); Serial.print("*");
+        previousCO2 = eco2;
+      }
+      else if (valueThreshold(etvoc, previousVOC, 1))
+      {
+        Serial.print("etvoc="); Serial.print(etvoc);    Serial.print(" ppb  ");
+        Homey.setCapabilityValue(MEASURE_CO, etvoc); Serial.print("*");
+        previousVOC = etvoc;
+      }
+    }
+  } else if ( errstat == CCS811_ERRSTAT_OK_NODATA ) {
+    Serial.println("CCS811: waiting for (new) data");
+  } else if ( errstat & CCS811_ERRSTAT_I2CFAIL ) {
+    Serial.println("CCS811: I2C error");
+  } else {
+    Serial.print("CCS811: errstat="); Serial.print(errstat, HEX);
+    Serial.print("="); Serial.println( ccs811.errstat_str(errstat) );
+  }
+
+  // Wait
+  if (frequencyTimer > 0) {
+    frequencyTimer -= 5;
+    delay(5000); // 5 sec
+  }
+  else {
+    delay(60000); // 1 minuut
+  }
+}
+
+void registerSensorWithHomey() {
+  Serial.println("Register sensor with Homey");
+  Homey.begin("Air Quality Sensor");
+  Homey.setClass("sensor");
+  Homey.addCapability(MEASURE_CO); //there is no capability in Homey for VOCs so we will (mis)use this one instead
+  Homey.addCapability(MEASURE_CO2);
+  Homey.addCapability(MEASURE_TEMPERATURE);
+  Homey.addCapability(MEASURE_HUMIDITY);
+}
+
+void wifiConnect() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Not connected to wifi, connecting now");
+    /* Explicitly set the ESP8266 to be a WiFi-client, otherwise, it by default,
+      would try to act as both a client and an access-point and could cause
+      network-issues with your other WiFi-devices on your WiFi-network. */
+    WiFi.mode(WIFI_STA);
+    //Connect to network
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500); Serial.print(".");
+    }
+
+    //Print IP address
+    Serial.print("Connected to IP address: ");
+    Serial.print("Ip: "); Serial.print(WiFi.localIP());
+    Serial.print("\tMAC: "); Serial.println(WiFi.macAddress());
+  }
+}
+
+// send messages more frequently in the first minute, then only if deviations are large enough
+boolean initialLogFrequency() {
+  if (frequencyTimer > 0)
+  {
+    return true;
+  }
+  else {
+    return false;
+  }
+}
+
+boolean valueThreshold(float a, float b, float delta) {
+  return fabs(a - b) >= delta;
+}
